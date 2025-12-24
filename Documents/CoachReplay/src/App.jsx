@@ -112,7 +112,6 @@ const App = () => {
 
       recorder.addEventListener('dataavailable', (e) => {
         if (e.data.size > 0) {
-          // Capture du Header (premier morceau vital)
           if (!mediaHeaderRef.current) {
             mediaHeaderRef.current = e.data;
           }
@@ -275,7 +274,6 @@ const App = () => {
       relevantChunks = chunksBufferRef.current.map(c => c.data);
     }
 
-    // Injection du Header manquant
     if (mediaHeaderRef.current && relevantChunks.length > 0) {
       if (relevantChunks[0] !== mediaHeaderRef.current) {
         relevantChunks = [mediaHeaderRef.current, ...relevantChunks];
@@ -403,15 +401,17 @@ const App = () => {
     }
   };
 
+  // Utilisation des Pointer Events pour supporter Mouse, Touch et Pen
   const getCanvasCoords = (e) => {
     const canvas = canvasRef.current;
     if (!canvas) return { x: 0, y: 0 };
 
     const rect = canvas.getBoundingClientRect();
 
-    // Coordonnées de l'événement (Touch ou Mouse)
-    const clientX = e.touches && e.touches.length > 0 ? e.touches[0].clientX : e.clientX;
-    const clientY = e.touches && e.touches.length > 0 ? e.touches[0].clientY : e.clientY;
+    // Avec PointerEvent, clientX/Y sont directement accessibles
+    // et corrects pour Souris, Touch et Pen
+    const clientX = e.clientX;
+    const clientY = e.clientY;
 
     // Calcul du facteur d'échelle
     const scaleX = canvas.width / rect.width;
@@ -426,7 +426,7 @@ const App = () => {
   const startDrawing = (e) => {
     if (isPlayingClip || drawingTool === 'none') return;
 
-    if (e.cancelable) e.preventDefault();
+    // e.target.setPointerCapture(e.pointerId); // Optionnel: capture le pointeur pour ne pas le perdre si on sort
 
     const p = getCanvasCoords(e);
     setCurrentShape({ type: drawingTool, points: [p], start: p, end: p, color: drawingColor });
@@ -434,10 +434,11 @@ const App = () => {
 
   const draw = (e) => {
     if (!currentShape || isPlayingClip || drawingTool === 'none') return;
-    if (e.cancelable) e.preventDefault();
 
-    // Vérif souris (clic gauche)
-    if (!e.touches && e.buttons !== 1) return;
+    // Pour un PointerEvent, pas besoin de vérifier e.buttons !== 1 pour le touch/pen, 
+    // mais pour la souris c'est utile. Le PointerEvent gère ça généralement bien.
+    // e.buttons === 1 signifie bouton principal (ou contact touch/pen) enfoncé.
+    if (e.buttons !== 1) return;
 
     const p = getCanvasCoords(e);
 
@@ -448,7 +449,8 @@ const App = () => {
     }
   };
 
-  const stopDrawing = () => {
+  const stopDrawing = (e) => {
+    // e.target.releasePointerCapture(e.pointerId); // Libère la capture
     if (currentShape) setShapes(prev => [...prev, currentShape]);
     setCurrentShape(null);
   };
@@ -498,23 +500,33 @@ const App = () => {
     if (!canvas || !container || viewMode !== 'analysis') return;
 
     const updateCanvasSize = () => {
-      // On aligne la résolution interne du canvas sur sa taille d'affichage exacte
       const rect = container.getBoundingClientRect();
       canvas.width = rect.width;
       canvas.height = rect.height;
     };
-
-    // Initial size
     updateCanvasSize();
-
-    // Observer pour les changements de taille (rotation iPad)
-    const resizeObserver = new ResizeObserver(() => {
-      updateCanvasSize();
-    });
-
+    const resizeObserver = new ResizeObserver(() => updateCanvasSize());
     resizeObserver.observe(container);
 
-    return () => resizeObserver.disconnect();
+    // 2. VERROUILLAGE SCROLL (Anti-Bounce iOS)
+    const preventDefault = (e) => {
+      // Bloque tout mouvement natif sur le canvas (scroll, refresh, zoom)
+      // Seulement si on ne joue pas la vidéo
+      // if (!isPlayingClip) e.preventDefault(); 
+      e.preventDefault();
+    };
+
+    // On garde les écouteurs 'touch' pour le preventDefault car 'pointer' ne suffit pas toujours à bloquer le scroll natif iOS
+    canvas.addEventListener('touchstart', preventDefault, { passive: false });
+    canvas.addEventListener('touchmove', preventDefault, { passive: false });
+    canvas.addEventListener('touchend', preventDefault, { passive: false });
+
+    return () => {
+      resizeObserver.disconnect();
+      canvas.removeEventListener('touchstart', preventDefault);
+      canvas.removeEventListener('touchmove', preventDefault);
+      canvas.removeEventListener('touchend', preventDefault);
+    };
   }, [viewMode]);
 
   // Boucle de rendu du dessin
@@ -567,8 +579,8 @@ const App = () => {
 
   // --- RENDER ---
   return (
-    // Utilisation de 100dvh pour le plein écran dynamique sur mobile
-    <div className="flex flex-col h-[100dvh] bg-black text-white font-sans overflow-hidden">
+    // FIX: overscroll-none et touch-none empêchent le rebond global de la page
+    <div className="flex flex-col h-[100dvh] bg-black text-white font-sans overflow-hidden overscroll-none touch-none">
       <input type="file" accept="video/*" ref={fileInputRef} onChange={handleFileUpload} className="hidden" />
 
       {/* VIEW: HOME */}
@@ -596,7 +608,7 @@ const App = () => {
               <ArrowRight className="ml-auto text-slate-500" />
             </button>
           </div>
-          <p className="absolute bottom-6 text-xs text-slate-600 font-mono">v2.5.0 (iOS Optimized)</p>
+          <p className="absolute bottom-6 text-xs text-slate-600 font-mono">v2.7.0 (Pencil Support)</p>
         </div>
       )}
 
@@ -769,7 +781,15 @@ const App = () => {
                 onError={(e) => { console.error("Erreur lecture:", e); setPlaybackError(true); }}
               />
             )}
-            <canvas ref={canvasRef} className={`absolute inset-0 w-full h-full z-10 ${isPlayingClip || drawingTool === 'none' ? 'pointer-events-none' : 'cursor-crosshair'}`} onMouseDown={startDrawing} onMouseMove={draw} onMouseUp={stopDrawing} onMouseLeave={stopDrawing} onTouchStart={startDrawing} onTouchMove={draw} onTouchEnd={stopDrawing} />
+            <canvas
+              ref={canvasRef}
+              style={{ touchAction: 'none' }} // Crucial pour le Pencil et le touch
+              className={`absolute inset-0 w-full h-full z-10 ${isPlayingClip || drawingTool === 'none' ? 'pointer-events-none' : 'cursor-crosshair'}`}
+              onPointerDown={startDrawing} // Utilisation de Pointer Events pour Pencil/Touch/Souris
+              onPointerMove={draw}
+              onPointerUp={stopDrawing}
+              onPointerLeave={stopDrawing}
+            />
           </div>
 
           {/* BARRE D'OUTILS ANALYSE SIMPLIFIEE */}
