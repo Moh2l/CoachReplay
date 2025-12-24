@@ -3,7 +3,7 @@ import {
   Camera, Disc, PenTool, Play, Pause, ChevronLeft,
   Eraser, Library, Circle as CircleIcon, ArrowRight, Minus,
   Video, Hand, Info, Upload, Download, AlertTriangle,
-  RotateCcw, FastForward, Rewind, SkipBack, Radio, Home, HardDrive, Eye
+  RotateCcw, FastForward, Rewind, SkipBack, Radio, Home, HardDrive, Eye, X, Undo
 } from 'lucide-react';
 
 // Helpers externes
@@ -38,7 +38,7 @@ const App = () => {
   const [playbackError, setPlaybackError] = useState(false);
 
   // Feedback clips
-  const [feedbackMessage, setFeedbackMessage] = useState(''); // Pour gérer différents messages
+  const [feedbackMessage, setFeedbackMessage] = useState('');
 
   const [isTimeShifting, setIsTimeShifting] = useState(false);
   const [timeShiftUrl, setTimeShiftUrl] = useState(null);
@@ -47,7 +47,6 @@ const App = () => {
   const [activeClip, setActiveClip] = useState(null);
 
   const [isPlayingClip, setIsPlayingClip] = useState(true);
-  const [progress, setProgress] = useState(0);
   const [drawingTool, setDrawingTool] = useState('none');
   const [drawingColor, setDrawingColor] = useState('#ef4444');
   const [shapes, setShapes] = useState([]);
@@ -59,6 +58,8 @@ const App = () => {
   const mediaRecorderRef = useRef(null);
   const chunksBufferRef = useRef([]);
   const fullSessionChunksRef = useRef([]);
+  const mediaHeaderRef = useRef(null);
+
   const canvasRef = useRef(null);
   const containerRef = useRef(null);
   const recordingTimerRef = useRef(null);
@@ -71,7 +72,6 @@ const App = () => {
 
   // --- FONCTIONS LOGIQUES ---
 
-  // Helper pour afficher feedback
   const showFeedback = (msg, isError = false) => {
     setFeedbackMessage(msg);
     const id = isError ? 'clip-feedback-error' : 'clip-feedback';
@@ -80,7 +80,7 @@ const App = () => {
       btn.style.opacity = 1;
       setTimeout(() => {
         btn.style.opacity = 0;
-        setFeedbackMessage(''); // Reset message
+        setFeedbackMessage('');
       }, 2000);
     }
   };
@@ -102,12 +102,21 @@ const App = () => {
       if (mediaRecorderRef.current && mediaRecorderRef.current.state !== 'inactive') {
         mediaRecorderRef.current.stop();
       }
+
+      chunksBufferRef.current = [];
+      mediaHeaderRef.current = null;
+
       const options = { mimeType: mimeType };
       const recorder = new MediaRecorder(mediaStream, options);
       mediaRecorderRef.current = recorder;
 
       recorder.addEventListener('dataavailable', (e) => {
         if (e.data.size > 0) {
+          // Capture du Header (premier morceau vital)
+          if (!mediaHeaderRef.current) {
+            mediaHeaderRef.current = e.data;
+          }
+
           const now = Date.now();
           chunksBufferRef.current.push({ data: e.data, timestamp: now });
 
@@ -130,6 +139,9 @@ const App = () => {
 
   const startRecordingProcess = () => {
     fullSessionChunksRef.current = [];
+    if (mediaHeaderRef.current) {
+      fullSessionChunksRef.current.push(mediaHeaderRef.current);
+    }
     setRecordingTime(0);
     setIsRecording(true);
     window.isRecordingActive = true;
@@ -246,37 +258,40 @@ const App = () => {
   };
 
   const createClip = (secondsBack) => {
-    // Si le buffer est totalement vide
     if (chunksBufferRef.current.length === 0) {
-      showFeedback("Tampon vide ! Attendez un peu.", true);
+      showFeedback("Tampon vide !", true);
       return;
     }
 
     const now = Date.now();
-    const safetyBuffer = 2000;
+    const safetyBuffer = 3000;
     const startTime = now - (secondsBack * 1000) - safetyBuffer;
 
     let relevantChunks = chunksBufferRef.current
       .filter(chunk => chunk.timestamp >= startTime)
       .map(c => c.data);
 
-    // Fallback: Si le filtrage temporel ne donne rien (début de session), on prend tout le buffer
     if (relevantChunks.length === 0) {
       relevantChunks = chunksBufferRef.current.map(c => c.data);
     }
 
-    // Double vérification
+    // Injection du Header manquant
+    if (mediaHeaderRef.current && relevantChunks.length > 0) {
+      if (relevantChunks[0] !== mediaHeaderRef.current) {
+        relevantChunks = [mediaHeaderRef.current, ...relevantChunks];
+      }
+    }
+
     if (relevantChunks.length === 0) {
-      showFeedback("Pas assez de vidéo !", true);
+      showFeedback("Erreur données", true);
       return;
     }
 
     try {
       const blob = new Blob(relevantChunks, { type: supportedMimeType });
 
-      // Gestion de l'erreur silencieuse: Blob vide
       if (blob.size === 0) {
-        showFeedback("Erreur: Clip vide (Bug iOS)", true);
+        showFeedback("Erreur: Vide", true);
         return;
       }
 
@@ -326,14 +341,18 @@ const App = () => {
 
   const handleTimeShift = (secondsToJump) => {
     if (chunksBufferRef.current.length === 0) {
-      showFeedback("Pas de retour arrière possible", true);
+      showFeedback("Pas de retour possible", true);
       return;
     }
     let blobUrl = timeShiftUrl;
 
     if (!isTimeShifting) {
       try {
-        const chunks = chunksBufferRef.current.map(c => c.data);
+        let chunks = chunksBufferRef.current.map(c => c.data);
+        if (mediaHeaderRef.current && chunks.length > 0 && chunks[0] !== mediaHeaderRef.current) {
+          chunks = [mediaHeaderRef.current, ...chunks];
+        }
+
         const blob = new Blob(chunks, { type: supportedMimeType });
         blobUrl = URL.createObjectURL(blob);
         setTimeShiftUrl(blobUrl);
@@ -372,31 +391,10 @@ const App = () => {
   };
 
   const handleVideoTimeUpdate = () => {
-    if (analysisVideoRef.current) {
-      const pct = (analysisVideoRef.current.currentTime / analysisVideoRef.current.duration) * 100;
-      setProgress(isNaN(pct) ? 0 : pct);
-    }
+    // La mise à jour du temps est gérée nativement par le lecteur
   };
 
-  const handleSeek = (e) => {
-    if (analysisVideoRef.current && Number.isFinite(analysisVideoRef.current.duration)) {
-      analysisVideoRef.current.currentTime = (parseFloat(e.target.value) / 100) * analysisVideoRef.current.duration;
-    }
-  };
-
-  const togglePlayPause = () => {
-    if (analysisVideoRef.current) {
-      if (isPlayingClip) {
-        analysisVideoRef.current.pause();
-      } else {
-        analysisVideoRef.current.play();
-        setDrawingTool('none');
-      }
-      setIsPlayingClip(!isPlayingClip);
-    }
-  };
-
-  // Dessin
+  // Dessin : Outils et Coordonnées Précises
   const selectTool = (tool) => {
     setDrawingTool(tool);
     if (tool !== 'none') {
@@ -406,15 +404,30 @@ const App = () => {
   };
 
   const getCanvasCoords = (e) => {
-    const rect = canvasRef.current.getBoundingClientRect();
-    const cx = e.touches?.[0]?.clientX ?? e.clientX;
-    const cy = e.touches?.[0]?.clientY ?? e.clientY;
-    return { x: cx - rect.left, y: cy - rect.top };
+    const canvas = canvasRef.current;
+    if (!canvas) return { x: 0, y: 0 };
+
+    const rect = canvas.getBoundingClientRect();
+
+    // Coordonnées de l'événement (Touch ou Mouse)
+    const clientX = e.touches && e.touches.length > 0 ? e.touches[0].clientX : e.clientX;
+    const clientY = e.touches && e.touches.length > 0 ? e.touches[0].clientY : e.clientY;
+
+    // Calcul du facteur d'échelle
+    const scaleX = canvas.width / rect.width;
+    const scaleY = canvas.height / rect.height;
+
+    return {
+      x: (clientX - rect.left) * scaleX,
+      y: (clientY - rect.top) * scaleY
+    };
   };
 
   const startDrawing = (e) => {
     if (isPlayingClip || drawingTool === 'none') return;
+
     if (e.cancelable) e.preventDefault();
+
     const p = getCanvasCoords(e);
     setCurrentShape({ type: drawingTool, points: [p], start: p, end: p, color: drawingColor });
   };
@@ -422,15 +435,27 @@ const App = () => {
   const draw = (e) => {
     if (!currentShape || isPlayingClip || drawingTool === 'none') return;
     if (e.cancelable) e.preventDefault();
+
+    // Vérif souris (clic gauche)
     if (!e.touches && e.buttons !== 1) return;
+
     const p = getCanvasCoords(e);
-    if (drawingTool === 'free') setCurrentShape(prev => ({ ...prev, points: [...prev.points, p] }));
-    else setCurrentShape(prev => ({ ...prev, end: p }));
+
+    if (drawingTool === 'free') {
+      setCurrentShape(prev => ({ ...prev, points: [...prev.points, p] }));
+    } else {
+      setCurrentShape(prev => ({ ...prev, end: p }));
+    }
   };
 
   const stopDrawing = () => {
     if (currentShape) setShapes(prev => [...prev, currentShape]);
     setCurrentShape(null);
+  };
+
+  // Fonction Undo
+  const undoLastShape = () => {
+    setShapes(prev => prev.slice(0, -1));
   };
 
   // --- EFFETS ---
@@ -465,25 +490,88 @@ const App = () => {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selectedDeviceId, viewMode]);
 
+  // Gestion du redimensionnement du Canvas
   useEffect(() => {
-    const canvas = canvasRef.current; if (!canvas || viewMode !== 'analysis') return;
-    canvas.width = containerRef.current?.clientWidth || 800; canvas.height = containerRef.current?.clientHeight || 600;
-    const ctx = canvas.getContext('2d'); ctx.clearRect(0, 0, canvas.width, canvas.height); ctx.lineCap = 'round'; ctx.lineJoin = 'round';
+    const canvas = canvasRef.current;
+    const container = containerRef.current;
+
+    if (!canvas || !container || viewMode !== 'analysis') return;
+
+    const updateCanvasSize = () => {
+      // On aligne la résolution interne du canvas sur sa taille d'affichage exacte
+      const rect = container.getBoundingClientRect();
+      canvas.width = rect.width;
+      canvas.height = rect.height;
+    };
+
+    // Initial size
+    updateCanvasSize();
+
+    // Observer pour les changements de taille (rotation iPad)
+    const resizeObserver = new ResizeObserver(() => {
+      updateCanvasSize();
+    });
+
+    resizeObserver.observe(container);
+
+    return () => resizeObserver.disconnect();
+  }, [viewMode]);
+
+  // Boucle de rendu du dessin
+  useEffect(() => {
+    const canvas = canvasRef.current;
+    if (!canvas || viewMode !== 'analysis') return;
+
+    const ctx = canvas.getContext('2d');
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+    ctx.lineCap = 'round';
+    ctx.lineJoin = 'round';
+
     const render = (s) => {
       ctx.strokeStyle = s.color; ctx.lineWidth = 4; ctx.beginPath();
-      if (s.type === 'free') { if (s.points.length < 2) return; ctx.moveTo(s.points[0].x, s.points[0].y); s.points.forEach(p => ctx.lineTo(p.x, p.y)); ctx.stroke(); }
-      else if (s.type === 'circle') { const r = Math.sqrt(Math.pow(s.end.x - s.start.x, 2) + Math.pow(s.end.y - s.start.y, 2)); ctx.arc(s.start.x, s.start.y, r, 0, 2 * Math.PI); ctx.stroke(); }
-      else if (s.type === 'line') { ctx.moveTo(s.start.x, s.start.y); ctx.lineTo(s.end.x, s.end.y); ctx.stroke(); }
-      else if (s.type === 'arrow') { const a = Math.atan2(s.end.y - s.start.y, s.end.x - s.start.x); ctx.moveTo(s.start.x, s.start.y); ctx.lineTo(s.end.x, s.end.y); ctx.stroke(); ctx.beginPath(); ctx.moveTo(s.end.x, s.end.y); ctx.lineTo(s.end.x - 20 * Math.cos(a - Math.PI / 6), s.end.y - 20 * Math.sin(a - Math.PI / 6)); ctx.moveTo(s.end.x, s.end.y); ctx.lineTo(s.end.x - 20 * Math.cos(a + Math.PI / 6), s.end.y - 20 * Math.sin(a + Math.PI / 6)); ctx.stroke(); }
+      if (s.type === 'free') {
+        if (s.points.length < 2) return;
+        ctx.moveTo(s.points[0].x, s.points[0].y);
+        s.points.forEach(p => ctx.lineTo(p.x, p.y));
+        ctx.stroke();
+      }
+      else if (s.type === 'circle') {
+        const r = Math.sqrt(Math.pow(s.end.x - s.start.x, 2) + Math.pow(s.end.y - s.start.y, 2));
+        ctx.arc(s.start.x, s.start.y, r, 0, 2 * Math.PI);
+        ctx.stroke();
+      }
+      else if (s.type === 'line') {
+        ctx.moveTo(s.start.x, s.start.y);
+        ctx.lineTo(s.end.x, s.end.y);
+        ctx.stroke();
+      }
+      else if (s.type === 'arrow') {
+        const a = Math.atan2(s.end.y - s.start.y, s.end.x - s.start.x);
+        const headlen = 20; // Taille de la pointe
+        ctx.moveTo(s.start.x, s.start.y);
+        ctx.lineTo(s.end.x, s.end.y);
+        ctx.stroke();
+        ctx.beginPath();
+        ctx.moveTo(s.end.x, s.end.y);
+        ctx.lineTo(s.end.x - headlen * Math.cos(a - Math.PI / 6), s.end.y - headlen * Math.sin(a - Math.PI / 6));
+        ctx.moveTo(s.end.x, s.end.y);
+        ctx.lineTo(s.end.x - headlen * Math.cos(a + Math.PI / 6), s.end.y - headlen * Math.sin(a + Math.PI / 6));
+        ctx.stroke();
+      }
     };
-    shapes.forEach(render); if (currentShape) render(currentShape);
-  }, [shapes, currentShape, viewMode, containerRef.current?.clientWidth]);
+
+    shapes.forEach(render);
+    if (currentShape) render(currentShape);
+
+  }, [shapes, currentShape, viewMode, canvasRef.current?.width, canvasRef.current?.height]);
 
   // --- RENDER ---
   return (
-    <div className="flex flex-col h-screen bg-slate-900 text-white font-sans overflow-hidden">
+    // Utilisation de 100dvh pour le plein écran dynamique sur mobile
+    <div className="flex flex-col h-[100dvh] bg-black text-white font-sans overflow-hidden">
       <input type="file" accept="video/*" ref={fileInputRef} onChange={handleFileUpload} className="hidden" />
 
+      {/* VIEW: HOME */}
       {viewMode === 'home' && (
         <div className="flex flex-col items-center justify-center h-full p-6 space-y-8 bg-slate-900">
           <div className="text-center space-y-2 mb-8 animate-in fade-in slide-in-from-bottom-4 duration-500">
@@ -494,7 +582,7 @@ const App = () => {
           <div className="w-full max-w-md space-y-4 animate-in fade-in slide-in-from-bottom-8 duration-700 delay-100">
             <button onClick={() => enterLiveMode(false)} className="w-full bg-slate-800 hover:bg-slate-700 text-white p-4 rounded-xl flex items-center gap-4 border border-slate-700 group">
               <div className="bg-blue-500/20 p-3 rounded-lg"><Eye size={24} className="text-blue-400" /></div>
-              <div className="text-left"><h3 className="font-bold text-lg">Mode Live (Timeshift)</h3><p className="text-xs text-slate-400">Replay immédiat, sans sauvegarde globale.</p></div>
+              <div className="text-left"><h3 className="font-bold text-lg">Mode Live</h3><p className="text-xs text-slate-400">Timeshift & Clips (Tampon 2min)</p></div>
               <ArrowRight className="ml-auto text-slate-500" />
             </button>
             <button onClick={() => enterLiveMode(true)} className="w-full bg-slate-800 hover:bg-slate-700 text-white p-4 rounded-xl flex items-center gap-4 border border-slate-700 group">
@@ -508,159 +596,223 @@ const App = () => {
               <ArrowRight className="ml-auto text-slate-500" />
             </button>
           </div>
-          <p className="absolute bottom-6 text-xs text-slate-600 font-mono">v1.5.0</p>
+          <p className="absolute bottom-6 text-xs text-slate-600 font-mono">v2.5.0 (iOS Optimized)</p>
         </div>
       )}
 
-      {viewMode !== 'home' && (
-        <>
-          <div className="h-16 bg-slate-800 flex items-center justify-between px-3 shadow-md z-20 shrink-0 gap-2">
-            <div className="flex items-center gap-2 overflow-hidden">
-              {viewMode !== 'live' ? (
-                <button onClick={() => setViewMode('live')} className="p-2 bg-slate-700 rounded-full hover:bg-slate-600 shrink-0"><ChevronLeft size={20} /></button>
-              ) : (
-                <div className="flex items-center gap-2 max-w-[300px]">
-                  <button onClick={goHome} className="p-2 bg-slate-700 rounded-full hover:bg-slate-600 shrink-0 mr-2"><Home size={18} /></button>
-                  <div className="flex items-center gap-2 bg-slate-900 rounded p-1 border border-slate-600">
-                    <div className="bg-blue-600 p-1 rounded shrink-0"><Camera size={14} /></div>
-                    <select value={selectedDeviceId} onChange={(e) => setSelectedDeviceId(e.target.value)} className="bg-transparent text-white text-xs py-1 rounded max-w-[120px] truncate focus:outline-none">{videoDevices.map(device => <option key={device.deviceId} value={device.deviceId}>{device.label || `Cam ${device.deviceId.slice(0, 5)}`}</option>)}</select>
-                  </div>
-                </div>
-              )}
+      {/* VIEW: LIVE & REC */}
+      {viewMode === 'live' && (
+        <div className="flex-1 relative bg-black flex flex-col h-full">
+
+          {/* ZONE VIDEO */}
+          <div className="relative flex-1 bg-black overflow-hidden flex items-center justify-center">
+            <video
+              ref={liveVideoRef}
+              autoPlay
+              playsInline
+              webkit-playsinline="true"
+              disablePictureInPicture
+              controlsList="nodownload noplaybackrate"
+              muted
+              controls={isTimeShifting}
+              className="w-full h-full object-contain"
+            />
+
+            {isTimeShifting && <div className="absolute top-4 bg-yellow-500/90 text-black px-4 py-1.5 rounded-full text-sm font-bold z-30 animate-pulse flex items-center gap-2 shadow-lg"><RotateCcw size={16} /> MODE DIFFÉRÉ</div>}
+            {errorMsg && <div className="absolute top-20 left-1/2 -translate-x-1/2 bg-red-600/90 text-white px-4 py-2 rounded-lg text-sm flex items-center gap-2 z-50"><AlertTriangle size={16} /> {errorMsg}</div>}
+
+            <div id="clip-feedback" className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 bg-white/90 text-black px-6 py-4 rounded-2xl font-bold text-xl opacity-0 transition-opacity pointer-events-none z-50 text-center shadow-2xl scale-110">
+              {feedbackMessage || "Clip Sauvegardé !"}
             </div>
+            <div id="clip-feedback-error" className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 bg-red-600/90 text-white px-6 py-4 rounded-2xl font-bold text-xl opacity-0 transition-opacity pointer-events-none z-50 text-center shadow-2xl">
+              {feedbackMessage || "Erreur !"}
+            </div>
+          </div>
 
-            {viewMode === 'live' && (
-              <div className={`hidden md:flex items-center gap-2 px-3 py-1 rounded-full text-xs font-bold border ${sessionType === 'rec' ? 'bg-red-900/30 border-red-500/50 text-red-400' : 'bg-blue-900/30 border-blue-500/50 text-blue-400'}`}>
-                {sessionType === 'rec' ? <HardDrive size={12} /> : <Eye size={12} />}
-                {sessionType === 'rec' ? 'ENREGISTREMENT TOTAL' : 'SESSION LIBRE'}
-              </div>
-            )}
+          {/* BARRE DE CONTROLE UNIFIEE (DOCK) */}
+          <div className="bg-slate-900 border-t border-slate-800 p-4 safe-area-pb z-40">
+            <div className="max-w-4xl mx-auto flex items-center justify-between">
 
-            <div className="flex items-center gap-3 shrink-0">
-              {isRecording && <div className="hidden sm:flex items-center gap-1.5 text-red-500 font-mono text-xs sm:text-sm bg-slate-900/50 px-2 py-1 rounded"><div className="w-2 h-2 rounded-full bg-red-500 animate-pulse" />{formatTime(recordingTime)}</div>}
-              {viewMode === 'live' && (
-                <button onClick={toggleRecording} className={`flex items-center gap-2 px-3 py-2 rounded-full text-xs sm:text-sm font-bold transition-all ${isRecording ? 'bg-red-600 text-white shadow-lg' : 'bg-white text-slate-900 hover:bg-slate-200'}`}>
-                  {isRecording ? <span className="hidden sm:inline">Arrêter</span> : <span>REC</span>}
-                  {isRecording ? <Disc size={18} className="animate-spin" /> : <Disc size={18} />}
+              {/* GAUCHE : Navigation & Caméra */}
+              <div className="flex items-center gap-3 w-1/3">
+                <button onClick={goHome} className="flex flex-col items-center justify-center w-12 h-12 rounded-xl bg-slate-800 text-slate-400 hover:text-white hover:bg-slate-700 transition-colors">
+                  <Home size={20} />
+                  <span className="text-[9px] mt-1 font-medium">Accueil</span>
                 </button>
-              )}
-            </div>
-          </div>
 
-          <div className="flex-1 relative bg-black overflow-hidden flex flex-col" ref={containerRef}>
-            {errorMsg && <div className="absolute top-4 left-4 right-4 z-50 bg-red-600/90 text-white p-2 rounded text-xs text-center flex items-center justify-center gap-2"><AlertTriangle size={16} /> {errorMsg}</div>}
-
-            <div className={`absolute inset-0 flex items-center justify-center ${viewMode === 'live' ? 'opacity-100 z-10' : 'opacity-0 -z-10'}`}>
-              <video ref={liveVideoRef} autoPlay playsInline muted controls={isTimeShifting} className="w-full h-full object-contain" />
-              {isTimeShifting && <div className="absolute top-4 bg-yellow-500/90 text-black px-3 py-1 rounded-full text-xs font-bold z-30 animate-pulse flex items-center gap-2"><RotateCcw size={14} /> DIFFÉRÉ</div>}
-
-              {/* Feedback avec message dynamique */}
-              <div id="clip-feedback" className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 bg-white/90 text-black px-6 py-3 rounded-xl font-bold text-xl opacity-0 transition-opacity pointer-events-none z-50 text-center whitespace-nowrap">
-                {feedbackMessage || "Clip Sauvegardé !"}
-              </div>
-              <div id="clip-feedback-error" className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 bg-red-600/90 text-white px-6 py-3 rounded-xl font-bold text-lg opacity-0 transition-opacity pointer-events-none z-50 text-center whitespace-nowrap">
-                {feedbackMessage || "Erreur !"}
-              </div>
-
-              <div className="absolute bottom-20 left-0 right-0 z-30 flex flex-col items-center gap-4 px-4 pointer-events-none">
-                <div className="pointer-events-auto flex items-center gap-4 bg-slate-900/80 p-2 rounded-full backdrop-blur-md border border-slate-700 shadow-xl">
-                  {isTimeShifting ? (
-                    <button onClick={goBackToLive} className="px-4 py-2 bg-red-600 hover:bg-red-500 rounded-full text-white text-xs font-bold flex items-center gap-2 animate-in fade-in zoom-in"><Radio size={14} className="animate-pulse" /> DIRECT</button>
-                  ) : (
-                    <div className="text-[10px] font-bold text-red-500 px-3 flex items-center gap-2"><div className="w-2 h-2 rounded-full bg-red-500 animate-pulse"></div> LIVE</div>
-                  )}
-                  <div className="h-6 w-px bg-slate-600 mx-1"></div>
-                  <button onClick={() => handleTimeShift(-10)} className="p-2 hover:bg-slate-700 rounded-full text-white flex flex-col items-center"><Rewind size={20} /><span className="text-[9px] font-bold">-10s</span></button>
-                  <button onClick={() => handleTimeShift(-5)} className="p-2 hover:bg-slate-700 rounded-full text-white flex flex-col items-center"><SkipBack size={20} /><span className="text-[9px] font-bold">-5s</span></button>
-                  <button onClick={() => handleTimeShift(5)} className="p-2 hover:bg-slate-700 rounded-full text-white flex flex-col items-center"><FastForward size={20} /><span className="text-[9px] font-bold">+5s</span></button>
-                </div>
-                {(isRecording || sessionType === 'free') && !isTimeShifting && (
-                  <div className="flex gap-4 pointer-events-auto mt-2">
-                    <button onClick={() => createClip(10)} className="w-12 h-12 rounded-full bg-blue-600/90 border border-blue-400 flex items-center justify-center shadow-lg text-white font-bold text-xs hover:scale-105 transition-transform">Save<br />-10s</button>
-                    <button onClick={() => createClip(20)} className="w-12 h-12 rounded-full bg-blue-600/90 border border-blue-400 flex items-center justify-center shadow-lg text-white font-bold text-xs hover:scale-105 transition-transform">Save<br />-20s</button>
+                <div className="relative group">
+                  <div className="flex flex-col items-center justify-center w-12 h-12 rounded-xl bg-slate-800 text-blue-400 hover:bg-slate-700 transition-colors cursor-pointer overflow-hidden">
+                    <Camera size={20} />
+                    <span className="text-[9px] mt-1 font-medium">Caméra</span>
+                    <select
+                      value={selectedDeviceId}
+                      onChange={(e) => setSelectedDeviceId(e.target.value)}
+                      className="absolute inset-0 opacity-0 cursor-pointer w-full h-full"
+                    >
+                      {videoDevices.map(device => (
+                        <option key={device.deviceId} value={device.deviceId}>
+                          {device.label || `Caméra ${device.deviceId.slice(0, 5)}`}
+                        </option>
+                      ))}
+                    </select>
                   </div>
-                )}
+                </div>
               </div>
-              <button onClick={() => setViewMode('gallery')} className="absolute bottom-6 left-6 flex items-center gap-2 bg-slate-800/90 hover:bg-slate-700 px-4 py-3 rounded-xl border border-slate-600 shadow-lg transition-colors z-40">
-                <div className="relative"><Library size={24} />{clips.length > 0 && <span className="absolute -top-2 -right-2 bg-red-500 text-white text-[10px] font-bold w-5 h-5 flex items-center justify-center rounded-full border border-slate-900 shadow-sm">{clips.length}</span>}</div>
-                <span className="font-semibold hidden sm:inline">Clips</span>
-              </button>
-            </div>
 
-            {viewMode === 'gallery' && (
-              <div className="absolute inset-0 bg-slate-900 p-4 overflow-y-auto z-20">
-                <h2 className="text-xl font-bold mb-4 text-slate-300">Bibliothèque ({clips.length})</h2>
-                <div className="mb-4 p-2 bg-slate-800 rounded border border-slate-700 text-[10px] text-slate-400 font-mono flex items-center gap-2"><Info size={12} /> Format: <span className="text-blue-400">{supportedMimeType || "?"}</span></div>
-                {clips.length === 0 ? <div className="flex flex-col items-center justify-center h-64 text-slate-500"><Video size={48} className="mb-2 opacity-50" /><p>Aucun clip.</p></div> : (
-                  <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-4 pb-20">
-                    {clips.map((clip, idx) => (
-                      <div key={clip.id} onClick={() => openClip(clip)} className="bg-slate-800 rounded-lg p-2 cursor-pointer hover:bg-slate-700 transition-colors border border-slate-700 group relative">
-                        <div className="aspect-video bg-black rounded flex items-center justify-center mb-2 relative overflow-hidden border border-slate-900">
-                          <video src={clip.url} className="w-full h-full object-cover opacity-60" playsInline muted preload="metadata" onLoadedMetadata={(e) => { e.target.currentTime = 0.1; }} />
-                          <div className="absolute inset-0 flex items-center justify-center group-hover:scale-110 transition-transform"><Play size={32} className="text-white fill-white/50" /></div>
-                          <div className="absolute bottom-1 right-1 bg-black/70 px-1.5 py-0.5 rounded text-xs text-white font-mono flex items-center gap-1">{clip.type === 'import' ? <Upload size={10} /> : <Video size={10} />}<span>{clip.duration === 'Import' ? 'Imp.' : `-${clip.duration}s`}</span></div>
-                        </div>
-                        <button onClick={(e) => downloadClip(e, clip)} className="absolute top-3 right-3 p-1.5 bg-slate-900/80 rounded hover:bg-blue-600 transition-colors text-white z-10" title="Télécharger"><Download size={14} /></button>
-                        <div className="flex justify-between items-center px-1"><span className="font-bold text-sm text-slate-200">Clip #{clips.length - idx}</span><span className="text-xs text-slate-400">{clip.timeString}</span></div>
+              {/* CENTRE : Contrôles Principaux */}
+              <div className="flex items-center justify-center gap-4 w-1/3 shrink-0">
+                {!isTimeShifting ? (
+                  <>
+                    <button onClick={() => createClip(10)} className="flex flex-col items-center gap-1 active:scale-95 transition-transform text-slate-300 hover:text-white">
+                      <div className="w-10 h-10 rounded-full border border-slate-600 flex items-center justify-center bg-slate-800">
+                        <span className="text-[10px] font-bold">-10s</span>
                       </div>
-                    ))}
+                    </button>
+
+                    <div className="relative">
+                      {isRecording && <div className="absolute -top-8 left-1/2 -translate-x-1/2 bg-red-600/90 text-white text-[10px] font-mono px-2 py-0.5 rounded-full animate-pulse">{formatTime(recordingTime)}</div>}
+                      <button
+                        onClick={toggleRecording}
+                        className={`w-16 h-16 rounded-full flex items-center justify-center border-4 shadow-lg active:scale-95 transition-all ${isRecording ? 'border-red-500 bg-red-600 text-white' : 'border-white bg-slate-200 text-slate-900 hover:bg-white'}`}
+                      >
+                        {isRecording ? <div className="w-6 h-6 bg-white rounded-sm" /> : <div className="w-6 h-6 bg-red-600 rounded-full" />}
+                      </button>
+                    </div>
+
+                    <button onClick={() => createClip(20)} className="flex flex-col items-center gap-1 active:scale-95 transition-transform text-slate-300 hover:text-white">
+                      <div className="w-10 h-10 rounded-full border border-slate-600 flex items-center justify-center bg-slate-800">
+                        <span className="text-[10px] font-bold">-20s</span>
+                      </div>
+                    </button>
+                  </>
+                ) : (
+                  // Contrôles Timeshift
+                  <div className="flex items-center gap-3">
+                    <button onClick={() => handleTimeShift(-5)} className="p-2 bg-slate-800 rounded-full text-white hover:bg-slate-700"><Rewind size={20} /></button>
+                    <button onClick={goBackToLive} className="px-4 py-2 bg-red-600 rounded-full text-white font-bold text-xs shadow-lg animate-pulse hover:bg-red-500">DIRECT</button>
+                    <button onClick={() => handleTimeShift(5)} className="p-2 bg-slate-800 rounded-full text-white hover:bg-slate-700"><FastForward size={20} /></button>
                   </div>
                 )}
               </div>
-            )}
 
-            {viewMode === 'analysis' && activeClip && (
-              <div className="absolute inset-0 bg-black z-30 flex flex-col">
-                <div className="flex-1 relative flex items-center justify-center bg-black overflow-hidden select-none">
-                  {playbackError ? (
-                    <div className="absolute inset-0 flex flex-col items-center justify-center bg-slate-900 z-20 p-6 text-center">
-                      <AlertTriangle size={48} className="text-yellow-500 mb-4" /><h3 className="text-lg font-bold mb-2">Format illisible</h3><p className="text-sm text-slate-400 mb-6">Lecteur intégré incompatible.</p>
-                      <button onClick={() => downloadClip(null, activeClip)} className="flex items-center gap-2 bg-blue-600 px-6 py-3 rounded-lg font-bold text-white shadow-lg"><Download size={20} /> Télécharger</button>
+              {/* DROITE : Galerie & Outils */}
+              <div className="flex items-center justify-end gap-3 w-1/3">
+                {!isTimeShifting && (
+                  <button onClick={() => handleTimeShift(-10)} className="flex flex-col items-center justify-center w-12 h-12 rounded-xl bg-slate-800 text-yellow-500 hover:bg-slate-700 transition-colors">
+                    <RotateCcw size={20} />
+                    <span className="text-[9px] mt-1 font-medium">Replay</span>
+                  </button>
+                )}
+
+                <button onClick={() => setViewMode('gallery')} className="flex flex-col items-center justify-center w-12 h-12 rounded-xl bg-slate-800 text-slate-300 hover:bg-slate-700 hover:text-white transition-colors relative">
+                  <Library size={20} />
+                  <span className="text-[9px] mt-1 font-medium">Clips</span>
+                  {clips.length > 0 && <span className="absolute -top-1 -right-1 bg-red-500 text-white text-[9px] font-bold w-4 h-4 flex items-center justify-center rounded-full">{clips.length}</span>}
+                </button>
+              </div>
+
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* VIEW: GALERIE */}
+      {viewMode === 'gallery' && (
+        <div className="flex-1 bg-slate-900 flex flex-col overflow-hidden">
+          <div className="h-16 bg-slate-800 flex items-center px-4 shadow-md shrink-0">
+            <button onClick={() => setViewMode(sessionType === 'free' || isRecording ? 'live' : 'home')} className="p-2 bg-slate-700 rounded-full text-white mr-4"><ChevronLeft /></button>
+            <h2 className="text-lg font-bold text-white">Bibliothèque ({clips.length})</h2>
+          </div>
+          <div className="flex-1 overflow-y-auto p-4">
+            {clips.length === 0 ? <div className="text-center text-slate-500 mt-20">Aucun clip enregistré.</div> : (
+              <div className="grid grid-cols-2 md:grid-cols-3 gap-4 pb-20">
+                {clips.map((clip, idx) => (
+                  <div key={clip.id} onClick={() => openClip(clip)} className="bg-slate-800 rounded-lg p-2 cursor-pointer border border-slate-700 relative group">
+                    <div className="aspect-video bg-black rounded flex items-center justify-center mb-2 relative overflow-hidden">
+                      <video src={clip.url} className="w-full h-full object-cover opacity-60" playsInline muted preload="metadata" onLoadedMetadata={(e) => { e.target.currentTime = 0.1 }} />
+                      <div className="absolute inset-0 flex items-center justify-center"><Play size={32} className="text-white" /></div>
+                      <span className="absolute bottom-1 right-1 bg-black/70 px-1 text-xs rounded">{clip.duration === 'Import' ? 'Imp.' : `-${clip.duration}s`}</span>
                     </div>
-                  ) : (
-                    <video
-                      ref={analysisVideoRef}
-                      src={activeClip.url}
-                      className="absolute inset-0 w-full h-full object-contain"
-                      playsInline
-                      webkit-playsinline="true"
-                      loop
-                      autoPlay
-                      muted={false}
-                      controls
-                      onTimeUpdate={handleVideoTimeUpdate}
-                      onError={(e) => { console.error("Erreur lecture:", e); setPlaybackError(true); }}
-                    />
-                  )}
-                  <canvas ref={canvasRef} style={{ touchAction: 'none' }} className={`absolute inset-0 w-full h-full z-10 ${isPlayingClip || drawingTool === 'none' ? 'pointer-events-none' : 'cursor-crosshair'}`} onMouseDown={startDrawing} onMouseMove={draw} onMouseUp={stopDrawing} onMouseLeave={stopDrawing} onTouchStart={startDrawing} onTouchMove={draw} onTouchEnd={stopDrawing} />
-                </div>
-                <div className="bg-slate-900 px-4 py-3 border-t border-slate-800 shrink-0">
-                  <div className="flex items-center gap-4">
-                    <button onClick={togglePlayPause} className="w-10 h-10 flex items-center justify-center bg-slate-700 rounded-full text-white hover:bg-blue-600 transition-colors">{isPlayingClip ? <Pause size={20} fill="currentColor" /> : <Play size={20} fill="currentColor" />}</button>
-                    <input type="range" min="0" max="100" value={progress} onChange={handleSeek} className="flex-1 h-2 bg-slate-700 rounded-lg appearance-none cursor-pointer accent-blue-500" />
+                    <div className="flex justify-between px-1"><span className="text-sm font-bold">Clip #{clips.length - idx}</span><span className="text-xs text-slate-400">{clip.timeString}</span></div>
+                    <button onClick={(e) => downloadClip(e, clip)} className="absolute top-3 right-3 p-1.5 bg-slate-900/80 rounded text-white z-10"><Download size={14} /></button>
                   </div>
-                </div>
-                <div className="bg-slate-800 p-2 safe-area-pb shrink-0 border-t border-slate-700">
-                  <div className="flex items-center justify-between gap-4 overflow-x-auto no-scrollbar py-1">
-                    <div className="flex bg-slate-700 rounded-lg p-1 shrink-0">
-                      <button onClick={() => selectTool('none')} className={`p-2 rounded ${drawingTool === 'none' ? 'bg-slate-500 text-white' : 'text-slate-400'}`} title="Vue"><Hand size={20} /></button>
-                      <div className="w-px bg-slate-600 mx-1"></div>
-                      <button onClick={() => selectTool('free')} className={`p-2 rounded ${drawingTool === 'free' ? 'bg-blue-600 text-white' : 'text-slate-400'}`}><PenTool size={20} /></button>
-                      <button onClick={() => selectTool('arrow')} className={`p-2 rounded ${drawingTool === 'arrow' ? 'bg-blue-600 text-white' : 'text-slate-400'}`}><ArrowRight size={20} /></button>
-                      <button onClick={() => selectTool('circle')} className={`p-2 rounded ${drawingTool === 'circle' ? 'bg-blue-600 text-white' : 'text-slate-400'}`}><CircleIcon size={20} /></button>
-                    </div>
-                    <div className="flex items-center gap-2 shrink-0 px-2 border-l border-r border-slate-600/50">
-                      {['#ef4444', '#3b82f6', '#eab308', '#ffffff'].map(c => <button key={c} onClick={() => setDrawingColor(c)} className={`w-8 h-8 rounded-full border-2 transition-transform ${drawingColor === c ? 'border-white scale-110' : 'border-transparent opacity-80'}`} style={{ backgroundColor: c }} />)}
-                    </div>
-                    <div className="flex gap-2 shrink-0"><button onClick={() => setShapes([])} className="flex items-center gap-1 px-3 py-2 bg-slate-700 rounded text-slate-300 active:bg-slate-600"><Eraser size={16} /><span className="text-xs font-medium">Effacer</span></button></div>
-                  </div>
-                  {drawingTool !== 'none' && <div className="text-center text-[10px] text-yellow-500 mt-1 uppercase tracking-widest font-bold animate-pulse">{isPlayingClip ? "Mettez en pause pour dessiner" : "Mode Dessin Actif"}</div>}
-                </div>
+                ))}
               </div>
             )}
           </div>
-        </>
+        </div>
       )}
+
+      {/* VIEW: ANALYSE */}
+      {viewMode === 'analysis' && activeClip && (
+        <div className="absolute inset-0 bg-black z-50 flex flex-col">
+          <div className="flex-1 relative flex items-center justify-center overflow-hidden bg-black" ref={containerRef}>
+            {playbackError ? (
+              <div className="absolute inset-0 flex flex-col items-center justify-center bg-slate-900 z-20 p-6 text-center">
+                <AlertTriangle size={48} className="text-yellow-500 mb-4" /><h3 className="text-lg font-bold mb-2">Format illisible</h3>
+                <button onClick={() => downloadClip(null, activeClip)} className="flex items-center gap-2 bg-blue-600 px-6 py-3 rounded-lg font-bold text-white shadow-lg"><Download size={20} /> Télécharger</button>
+              </div>
+            ) : (
+              <video
+                ref={analysisVideoRef}
+                src={activeClip.url}
+                className="absolute inset-0 w-full h-full object-contain"
+                playsInline
+                webkit-playsinline="true"
+                loop
+                autoPlay
+                muted={false}
+                controls // LECTEUR NATIF ACTIF
+                onPlay={() => setIsPlayingClip(true)}
+                onPause={() => setIsPlayingClip(false)}
+                onTimeUpdate={handleVideoTimeUpdate}
+                onError={(e) => { console.error("Erreur lecture:", e); setPlaybackError(true); }}
+              />
+            )}
+            <canvas ref={canvasRef} className={`absolute inset-0 w-full h-full z-10 ${isPlayingClip || drawingTool === 'none' ? 'pointer-events-none' : 'cursor-crosshair'}`} onMouseDown={startDrawing} onMouseMove={draw} onMouseUp={stopDrawing} onMouseLeave={stopDrawing} onTouchStart={startDrawing} onTouchMove={draw} onTouchEnd={stopDrawing} />
+          </div>
+
+          {/* BARRE D'OUTILS ANALYSE SIMPLIFIEE */}
+          <div className="bg-slate-900 border-t border-slate-800 p-2 safe-area-pb">
+            <div className="flex items-center justify-between gap-4 overflow-x-auto no-scrollbar py-2">
+              <div className="flex bg-slate-800 rounded-lg p-1">
+                <button onClick={() => selectTool('none')} className={`p-2 rounded ${drawingTool === 'none' ? 'bg-slate-600 text-white' : 'text-slate-400'}`}><Hand size={20} /></button>
+                <button onClick={() => selectTool('free')} className={`p-2 rounded ${drawingTool === 'free' ? 'bg-blue-600 text-white' : 'text-slate-400'}`}><PenTool size={20} /></button>
+                <button onClick={() => selectTool('arrow')} className={`p-2 rounded ${drawingTool === 'arrow' ? 'bg-blue-600 text-white' : 'text-slate-400'}`}><ArrowRight size={20} /></button>
+                <button onClick={() => selectTool('circle')} className={`p-2 rounded ${drawingTool === 'circle' ? 'bg-blue-600 text-white' : 'text-slate-400'}`}><CircleIcon size={20} /></button>
+              </div>
+
+              <div className="flex items-center gap-2">
+                {/* Couleurs de base + nouvelles */}
+                {['#ef4444', '#3b82f6', '#eab308', '#22c55e', '#000000', '#ffffff'].map(c => (
+                  <button
+                    key={c}
+                    onClick={() => setDrawingColor(c)}
+                    className={`w-6 h-6 rounded-full border-2 ${drawingColor === c ? 'border-white scale-110' : 'border-transparent opacity-50'}`}
+                    style={{ backgroundColor: c }}
+                  />
+                ))}
+
+                {/* Sélecteur de couleur personnalisé (Arc-en-ciel) */}
+                <label className="relative flex items-center justify-center w-6 h-6 rounded-full bg-gradient-to-br from-red-500 via-green-500 to-blue-500 border-2 border-slate-600 cursor-pointer hover:scale-110 transition-transform ml-1" title="Autre couleur">
+                  <input
+                    type="color"
+                    className="opacity-0 absolute inset-0 w-full h-full cursor-pointer"
+                    onChange={(e) => setDrawingColor(e.target.value)}
+                  />
+                </label>
+              </div>
+
+              <div className="flex gap-2 border-l border-slate-700 pl-2">
+                <button onClick={undoLastShape} className="p-2 bg-slate-800 rounded text-slate-300 hover:text-white" title="Annuler"><Undo size={20} /></button>
+                <button onClick={() => setShapes([])} className="p-2 bg-slate-800 rounded text-slate-300 hover:text-white" title="Tout effacer"><Eraser size={20} /></button>
+                <button onClick={() => setViewMode('gallery')} className="p-2 bg-red-900/50 text-red-400 rounded hover:bg-red-900"><X size={20} /></button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
     </div>
   );
 };
