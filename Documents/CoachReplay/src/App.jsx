@@ -112,6 +112,7 @@ const App = () => {
 
       recorder.addEventListener('dataavailable', (e) => {
         if (e.data.size > 0) {
+          // Capture du Header (premier morceau vital)
           if (!mediaHeaderRef.current) {
             mediaHeaderRef.current = e.data;
           }
@@ -195,6 +196,8 @@ const App = () => {
           deviceId: { exact: deviceId },
           width: { ideal: 1280 },
           height: { ideal: 720 },
+          // FIX IPAD: Forcer le ratio paysage 16:9 pour éviter la rotation verticale
+          aspectRatio: { ideal: 1.7777777778 },
           frameRate: { ideal: 30 }
         }
       };
@@ -401,15 +404,13 @@ const App = () => {
     }
   };
 
-  // Utilisation des Pointer Events pour supporter Mouse, Touch et Pen
   const getCanvasCoords = (e) => {
     const canvas = canvasRef.current;
     if (!canvas) return { x: 0, y: 0 };
 
     const rect = canvas.getBoundingClientRect();
 
-    // Avec PointerEvent, clientX/Y sont directement accessibles
-    // et corrects pour Souris, Touch et Pen
+    // Coordonnées de l'événement (Touch ou Mouse)
     const clientX = e.clientX;
     const clientY = e.clientY;
 
@@ -426,7 +427,11 @@ const App = () => {
   const startDrawing = (e) => {
     if (isPlayingClip || drawingTool === 'none') return;
 
-    // e.target.setPointerCapture(e.pointerId); // Optionnel: capture le pointeur pour ne pas le perdre si on sort
+    // FIX DESSIN #1 : CAPTURE DU POINTEUR
+    // Cela force le navigateur à suivre ce doigt précis, même s'il bouge vite
+    e.currentTarget.setPointerCapture(e.pointerId);
+
+    if (e.cancelable) e.preventDefault();
 
     const p = getCanvasCoords(e);
     setCurrentShape({ type: drawingTool, points: [p], start: p, end: p, color: drawingColor });
@@ -435,10 +440,10 @@ const App = () => {
   const draw = (e) => {
     if (!currentShape || isPlayingClip || drawingTool === 'none') return;
 
-    // Pour un PointerEvent, pas besoin de vérifier e.buttons !== 1 pour le touch/pen, 
-    // mais pour la souris c'est utile. Le PointerEvent gère ça généralement bien.
-    // e.buttons === 1 signifie bouton principal (ou contact touch/pen) enfoncé.
-    if (e.buttons !== 1) return;
+    if (e.cancelable) e.preventDefault();
+
+    // FIX DESSIN #2 : Suppression de la verif e.buttons pour le tactile qui posait problème
+    // On se fie uniquement à l'état currentShape qui est géré par start/stop
 
     const p = getCanvasCoords(e);
 
@@ -450,7 +455,9 @@ const App = () => {
   };
 
   const stopDrawing = (e) => {
-    // e.target.releasePointerCapture(e.pointerId); // Libère la capture
+    // Libération de la capture
+    e.currentTarget.releasePointerCapture(e.pointerId);
+
     if (currentShape) setShapes(prev => [...prev, currentShape]);
     setCurrentShape(null);
   };
@@ -500,23 +507,18 @@ const App = () => {
     if (!canvas || !container || viewMode !== 'analysis') return;
 
     const updateCanvasSize = () => {
+      // On aligne la résolution interne du canvas sur sa taille d'affichage exacte
       const rect = container.getBoundingClientRect();
       canvas.width = rect.width;
       canvas.height = rect.height;
     };
+
     updateCanvasSize();
     const resizeObserver = new ResizeObserver(() => updateCanvasSize());
     resizeObserver.observe(container);
 
-    // 2. VERROUILLAGE SCROLL (Anti-Bounce iOS)
-    const preventDefault = (e) => {
-      // Bloque tout mouvement natif sur le canvas (scroll, refresh, zoom)
-      // Seulement si on ne joue pas la vidéo
-      // if (!isPlayingClip) e.preventDefault(); 
-      e.preventDefault();
-    };
-
-    // On garde les écouteurs 'touch' pour le preventDefault car 'pointer' ne suffit pas toujours à bloquer le scroll natif iOS
+    // Verrouillage scroll anti-rebond
+    const preventDefault = (e) => { e.preventDefault(); };
     canvas.addEventListener('touchstart', preventDefault, { passive: false });
     canvas.addEventListener('touchmove', preventDefault, { passive: false });
     canvas.addEventListener('touchend', preventDefault, { passive: false });
@@ -608,7 +610,7 @@ const App = () => {
               <ArrowRight className="ml-auto text-slate-500" />
             </button>
           </div>
-          <p className="absolute bottom-6 text-xs text-slate-600 font-mono">v2.7.0 (Pencil Support)</p>
+          <p className="absolute bottom-6 text-xs text-slate-600 font-mono">v2.8.0 (iPad Fixes)</p>
         </div>
       )}
 
@@ -783,9 +785,9 @@ const App = () => {
             )}
             <canvas
               ref={canvasRef}
-              style={{ touchAction: 'none' }} // Crucial pour le Pencil et le touch
+              style={{ touchAction: 'none' }} // FIX TACTILE
               className={`absolute inset-0 w-full h-full z-10 ${isPlayingClip || drawingTool === 'none' ? 'pointer-events-none' : 'cursor-crosshair'}`}
-              onPointerDown={startDrawing} // Utilisation de Pointer Events pour Pencil/Touch/Souris
+              onPointerDown={startDrawing} // FIX POINTER
               onPointerMove={draw}
               onPointerUp={stopDrawing}
               onPointerLeave={stopDrawing}
@@ -803,7 +805,7 @@ const App = () => {
               </div>
 
               <div className="flex items-center gap-2">
-                {/* Couleurs de base + nouvelles */}
+                {/* Couleurs */}
                 {['#ef4444', '#3b82f6', '#eab308', '#22c55e', '#000000', '#ffffff'].map(c => (
                   <button
                     key={c}
@@ -813,8 +815,8 @@ const App = () => {
                   />
                 ))}
 
-                {/* Sélecteur de couleur personnalisé (Arc-en-ciel) */}
-                <label className="relative flex items-center justify-center w-6 h-6 rounded-full bg-gradient-to-br from-red-500 via-green-500 to-blue-500 border-2 border-slate-600 cursor-pointer hover:scale-110 transition-transform ml-1" title="Autre couleur">
+                {/* Custom color picker */}
+                <label className="relative flex items-center justify-center w-6 h-6 rounded-full bg-gradient-to-br from-red-500 via-green-500 to-blue-500 border-2 border-slate-600 cursor-pointer hover:scale-110 transition-transform ml-1">
                   <input
                     type="color"
                     className="opacity-0 absolute inset-0 w-full h-full cursor-pointer"
